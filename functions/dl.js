@@ -1,3 +1,28 @@
+// Download proxy for generated image/video files.
+//
+// SECURITY: the original version accepted ANY http(s) URL, which made this a
+// general-purpose open proxy (abusable as an SSRF relay by anyone who finds the
+// *.pages.dev domain). Now only hostnames belonging to the configured AI
+// providers are allowed. Match rule is exact host or a subdomain of it, so
+// "evil-siliconflow.cn" will NOT pass.
+
+const ALLOWED_HOST_SUFFIXES = [
+  "ai.gitee.com",
+  "gitee.com",
+  "siliconflow.cn",
+  "bigmodel.cn",
+  "aliyuncs.com",
+  "agnes-ai.com",
+  "tencentcloud.com",
+  "myqcloud.com",
+];
+
+function hostAllowed(hostname) {
+  const h = String(hostname || "").toLowerCase();
+  if (!h) return false;
+  return ALLOWED_HOST_SUFFIXES.some((s) => h === s || h.endsWith("." + s));
+}
+
 export async function onRequest(context) {
   const { request } = context;
 
@@ -13,6 +38,34 @@ export async function onRequest(context) {
       status: 400,
       headers: { "Content-Type": "application/json", ...corsHeaders() },
     });
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(target);
+  } catch {
+    return new Response(JSON.stringify({ error: "Malformed url param" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders() },
+    });
+  }
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return new Response(JSON.stringify({ error: "Unsupported protocol" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", ...corsHeaders() },
+    });
+  }
+
+  if (!hostAllowed(parsed.hostname)) {
+    return new Response(
+      JSON.stringify({
+        error: "Host not allowed",
+        host: parsed.hostname,
+        allowed: ALLOWED_HOST_SUFFIXES,
+      }),
+      { status: 403, headers: { "Content-Type": "application/json", ...corsHeaders() } }
+    );
   }
 
   // Forward a minimal set of headers (Range helps for video)

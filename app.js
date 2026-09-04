@@ -2,17 +2,136 @@
 // - Calls ai.gitee.com via same-origin proxy: /api/* (Pages Functions) to avoid CORS.
 // - Downloads images/videos via /dl?url=... (Pages Function) to avoid cross-origin blocks.
 
-const BASE_V1 = "https://ai.gitee.com/v1"; // for reference only (proxied)
 const $ = (id) => document.getElementById(id);
 
-const Z_RESOLUTIONS = {
-  "1:1 (2048x2048)": [2048, 2048],
-  "1:1 (1024x1024)": [1024, 1024],
-  "3:4 (768x1024)": [768, 1024],
-  "4:3 (1024x768)": [1024, 768],
-  "16:9 (1024x576)": [1024, 576],
-  "9:16 (576x1024)": [576, 1024],
+// Provider registry: how to talk to each OpenAI-ish host.
+// sizeKey / countKey are the important bit — SiliconFlow uses image_size +
+// batch_size instead of the OpenAI style size + n. resultKey is where the
+// generated images live in the JSON response.
+const PROVIDERS = {
+  gitee: {
+    label: "Gitee AI",
+    keyUrl: "https://ai.gitee.com/serverless-api",
+    models: ["z-image-turbo"],
+    sizeKey: "size",
+    countKey: "n",
+    resultKey: "data",
+    async: true,
+  },
+  siliconflow: {
+    label: "硅基流动 SiliconFlow",
+    keyUrl: "https://cloud.siliconflow.cn/account/ak",
+    models: [
+      "Qwen/Qwen-Image",
+      "Kwai-Kolors/Kolors",
+      "black-forest-labs/FLUX.1-schnell",
+      "baidu/ERNIE-Image-Turbo",
+    ],
+    sizeKey: "image_size",
+    countKey: "batch_size",
+    resultKey: "images",
+    async: false,
+  },
+  zhipu: {
+    label: "智谱 BigModel",
+    keyUrl: "https://open.bigmodel.cn/usercenter/apikeys",
+    models: ["glm-image", "cogview-4", "cogview-3-flash"],
+    sizeKey: "size",
+    countKey: null,
+    resultKey: "data",
+    async: false,
+    note: "尺寸需为 32 的倍数，已按官方推荐值预置",
+  },
+  dashscope: {
+    label: "阿里百炼（兼容模式）",
+    keyUrl: "https://bailian.console.aliyun.com/",
+    models: ["qwen-image-max", "qwen-image-plus", "qwen-image-2.0-pro"],
+    sizeKey: "size",
+    countKey: "n",
+    resultKey: "data",
+    async: false,
+    note: "阿里云文档说明图像模型可能不支持兼容模式，若报错请改用官方 SDK 接口",
+  },
+  anges: {
+    label: "Agnes AI（免费）",
+    keyUrl: "https://platform.agnes-ai.com/",
+    models: ["agnes-image-2.1-flash", "agnes-image-2.0-flash"],
+    sizeKey: "size",
+    countKey: "n",
+    resultKey: "data",
+    async: false,
+    note: "完全免费、无限调用，无需绑卡；返回 URL 或 Base64 均可，默认取 URL",
+  },
+  hunyuan: {
+    label: "腾讯混元（TokenHub）",
+    keyUrl: "https://console.cloud.tencent.com/tokenhub",
+    models: ["HY-Image-V3.0"],
+    sizeKey: "size",
+    countKey: "n",
+    resultKey: "data",
+    async: false,
+    note: "走 TokenHub 的 OpenAI 兼容接口；图片面积限制 ≤1024×1024，已按官方约束预置尺寸",
+  },
 };
+
+// Each provider accepts a different set of resolutions
+const SIZES = {
+  gitee: {
+    "1:1 (2048x2048)": [2048, 2048],
+    "1:1 (1024x1024)": [1024, 1024],
+    "3:4 (768x1024)": [768, 1024],
+    "4:3 (1024x768)": [1024, 768],
+    "16:9 (1024x576)": [1024, 576],
+    "9:16 (576x1024)": [576, 1024],
+  },
+  siliconflow: {
+    "1:1 (1024x1024)": [1024, 1024],
+    "3:4 (768x1024)": [768, 1024],
+    "4:3 (1024x768)": [1024, 768],
+    "16:9 (1024x576)": [1024, 576],
+    "9:16 (576x1024)": [576, 1024],
+  },
+  zhipu: {
+    "1:1 (1280x1280)": [1280, 1280],
+    "4:3 (1472x1088)": [1472, 1088],
+    "3:4 (1088x1472)": [1088, 1472],
+    "16:9 (1728x960)": [1728, 960],
+    "9:16 (960x1728)": [960, 1728],
+  },
+  dashscope: {
+    "1:1 (1024x1024)": [1024, 1024],
+    "16:9 (1664x928)": [1664, 928],
+    "9:16 (928x1664)": [928, 1664],
+    "4:3 (1472x1104)": [1472, 1104],
+    "3:4 (1104x1472)": [1104, 1472],
+  },
+  // Agnes AI: 多种清晰度档位与宽高比，沿用 OpenAI 风格 size=WxH
+  anges: {
+    "1:1 (1024x1024)": [1024, 1024],
+    "3:4 (768x1024)": [768, 1024],
+    "4:3 (1024x768)": [1024, 768],
+    "16:9 (1024x576)": [1024, 576],
+    "9:16 (576x1024)": [576, 1024],
+  },
+  // 腾讯混元 TokenHub Hy-Image-3.0: 宽高 [512,2048]，面积 ≤ 1024×1024
+  hunyuan: {
+    "1:1 (1024x1024)": [1024, 1024],
+    "4:3 (1024x768)": [1024, 768],
+    "3:4 (768x1024)": [768, 1024],
+    "3:2 (1152x768)": [1152, 768],
+    "2:3 (768x1152)": [768, 1152],
+  },
+};
+
+function currentProviderId() {
+  const el = $("providerSel");
+  const v = el && el.value;
+  return v && PROVIDERS[v] ? v : "gitee";
+}
+
+function currentProvider() {
+  return PROVIDERS[currentProviderId()];
+}
 
 const EDIT_TASK_TYPES = ["id", "style", "pose", "layout", "color", "background"];
 
@@ -53,6 +172,12 @@ function waitingStatusText(label, tick, elapsedMs, extra="") {
   return `${label} 轮询中... 已等待 ${sec}s • 第 ${tick} 次检查${extraText} • 正常等待，并非卡死`;
 }
 
+const KEY_PREFIX = "moark_api_key_";
+
+function storageKey(providerId) {
+  return KEY_PREFIX + (providerId || currentProviderId());
+}
+
 function getApiKey() {
   const key = $("apiKey").value.trim();
   if (!key) throw new Error("请输入 API Key / Please enter API Key");
@@ -62,20 +187,19 @@ function getApiKey() {
 function rememberKeyMaybe() {
   const key = $("apiKey").value.trim();
   if ($("rememberKey").checked && key) {
-    localStorage.setItem("moark_api_key", key);
+    // Each provider keeps its own key
+    localStorage.setItem(storageKey(), key);
   }
 }
 
 function loadRememberedKey() {
-  const key = localStorage.getItem("moark_api_key") || "";
-  if (key) {
-    $("apiKey").value = key;
-    $("rememberKey").checked = true;
-  }
+  const key = localStorage.getItem(storageKey()) || "";
+  $("apiKey").value = key;
+  $("rememberKey").checked = !!key;
 }
 
 function clearRememberedKey() {
-  localStorage.removeItem("moark_api_key");
+  localStorage.removeItem(storageKey());
   $("apiKey").value = "";
   $("rememberKey").checked = false;
 }
@@ -163,9 +287,11 @@ function clearOutput() {
   $("output").innerHTML = "";
 }
 
-// Same-origin proxy to ai.gitee.com/v1
+// Same-origin proxy: /api/<provider>/<path> -> that provider's upstream.
+// Every call (including task polling) automatically follows the selected provider.
 async function apiFetch(path, {method="GET", headers={}, body=null, signal=null}={}) {
-  const res = await fetch(`/api/${path.replace(/^\/+/, "")}`, {
+  const p = currentProviderId();
+  const res = await fetch(`/api/${p}/${path.replace(/^\/+/, "")}`, {
     method,
     headers,
     body,
@@ -395,15 +521,25 @@ async function runZImage() {
   const apiKey = getApiKey();
   rememberKeyMaybe();
 
+  const provId = currentProviderId();
+  const prov = currentProvider();
+
   const prompt = $("zPrompt").value.trim();
   if (!prompt) throw new Error("请输入提示词 / Please input prompt");
 
   const n = clampInt($("zN").value, 1, 4, 1);
-  const [w, h] = Z_RESOLUTIONS[$("zRes").value];
+  const sizes = SIZES[provId] || SIZES.gitee;
+  const sizeSel = sizes[$("zRes").value] ? $("zRes").value : Object.keys(sizes)[0];
+  const [w, h] = sizes[sizeSel];
   const size = `${w}x${h}`;
+  const model = $("zModel") && $("zModel").value ? $("zModel").value : prov.models[0];
 
-  setStatus("z-image 生成中... / Generating...");
-  const payload = { prompt, model: "z-image-turbo", n, size };
+  setStatus("文生图生成中... / Generating...");
+
+  // Providers disagree on field names: SiliconFlow wants image_size + batch_size
+  const payload = { prompt, model };
+  payload[prov.sizeKey] = size;
+  if (prov.countKey) payload[prov.countKey] = n;
 
   const res = await apiFetch("images/generations", {
     method: "POST",
@@ -416,13 +552,21 @@ async function runZImage() {
 
   const j = await readJsonSafely(res);
   if (!res.ok) {
-    setStatus("z-image 失败 / Failed", "err");
-    addOutputItem({ title: "z-image 生成失败 / Failed", rawJson: j, meta: `HTTP ${res.status}` });
+    setStatus("文生图失败 / Failed", "err");
+    addOutputItem({
+      title: "文生图生成失败 / Failed",
+      rawJson: j,
+      meta: `HTTP ${res.status} • provider=${provId} • model=${model}`,
+    });
     throw new Error(`API 错误 / API Error (${res.status})`);
   }
 
-  // Expect OpenAI-like: { data: [ { url | b64_json } ] }
-  const data = Array.isArray(j.data) ? j.data : [];
+  // OpenAI style returns data[], SiliconFlow returns images[]. Accept either.
+  const data =
+    (Array.isArray(j[prov.resultKey]) && j[prov.resultKey]) ||
+    (Array.isArray(j.data) && j.data) ||
+    (Array.isArray(j.images) && j.images) ||
+    [];
   if (!data.length) {
     addOutputItem({ title: "z-image 返回无数据 / Empty response", rawJson: j });
     setStatus("z-image 失败 / Failed", "err");
@@ -775,15 +919,65 @@ async function runWan() {
 }
 
 // ---- init UI ----
-function initUi() {
-  // fill selects
-  const zRes = $("zRes");
-  for (const k of Object.keys(Z_RESOLUTIONS)) {
+function fillSelect(el, values, keepValue) {
+  if (!el) return;
+  el.innerHTML = "";
+  for (const k of values) {
     const o = document.createElement("option");
-    o.value = k; o.textContent = k;
-    zRes.appendChild(o);
+    o.value = k;
+    o.textContent = k;
+    el.appendChild(o);
   }
-  zRes.value = Object.keys(Z_RESOLUTIONS)[0];
+  if (keepValue && values.indexOf(keepValue) !== -1) el.value = keepValue;
+}
+
+function refreshProviderUi() {
+  const provId = currentProviderId();
+  const prov = PROVIDERS[provId];
+
+  fillSelect($("zModel"), prov.models);
+  fillSelect($("zRes"), Object.keys(SIZES[provId] || SIZES.gitee));
+
+  const link = $("providerKeyUrl");
+  if (link) {
+    link.textContent = prov.keyUrl;
+    link.href = prov.keyUrl;
+  }
+  const note = $("providerNote");
+  if (note) note.textContent = prov.note || "";
+
+  // Async models (Edit / Wan / Hunyuan) only exist on Gitee
+  const modelSel = $("modelSel");
+  if (modelSel) {
+    Array.from(modelSel.options).forEach((opt) => {
+      opt.disabled = !prov.async && opt.value !== "z-image";
+    });
+    if (!prov.async && modelSel.value !== "z-image") modelSel.value = "z-image";
+    showPanel(modelSel.value);
+  }
+
+  loadRememberedKey();
+}
+
+function initUi() {
+  // fill provider select
+  const pSel = $("providerSel");
+  if (pSel) {
+    for (const id of Object.keys(PROVIDERS)) {
+      const o = document.createElement("option");
+      o.value = id;
+      o.textContent = PROVIDERS[id].label;
+      pSel.appendChild(o);
+    }
+    const saved = localStorage.getItem("moark_provider");
+    if (saved && PROVIDERS[saved]) pSel.value = saved;
+    pSel.addEventListener("change", () => {
+      localStorage.setItem("moark_provider", pSel.value);
+      refreshProviderUi();
+    });
+  }
+
+  refreshProviderUi();
 
   const wanRes = $("wanResPreset");
   for (const k of Object.keys(WAN_RES_PRESETS)) {
