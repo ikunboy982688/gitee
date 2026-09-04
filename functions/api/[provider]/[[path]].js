@@ -9,7 +9,7 @@ const PROVIDERS = {
   zhipu: "https://open.bigmodel.cn/api/paas/v4",
   dashscope: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   anges: "https://apihub.agnes-ai.com/v1",
-  hunyuan: "https://api.tokenhub.tencentcloud.com/v1",
+  hunyuan: "https://tokenhub.tencentmaas.com/v1",
 };
 
 export async function onRequest(context) {
